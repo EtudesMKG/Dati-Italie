@@ -319,6 +319,75 @@ def _norm(t):
     return {"valle d aosta": "aosta"}.get(t, t)
 
 
+# ---------------------------------------------------------------- tableaux ISTAT mis en forme (repris tels quels)
+def raw_stack(path, skip=("Introduzione",)):
+    """Empile toutes les feuilles d'un classeur ISTAT (tableaux mis en forme) dans une seule grille, sans retraitement."""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    rows = [[f"Source ISTAT : {os.path.basename(path)}"], []]
+    for ws in wb.worksheets:
+        if ws.title in skip or ws.title.lower().startswith("errori"):
+            continue
+        rows.append([f"=== Feuille ISTAT : {ws.title}"])
+        for r in ws.iter_rows(values_only=True):
+            r = list(r)
+            while r and r[-1] is None:
+                r.pop()
+            if r:
+                rows.append(r)
+        rows.append([])
+    df = pd.DataFrame(rows)
+    df.attrs["raw"] = True
+    return df
+
+
+def forze_lavoro_prov():
+    """ISTAT Forze di lavoro 2023 - Dati provinciali : une ligne par région/province, toutes les feuilles côte à côte.
+    Valeurs telles que publiées (effectifs EN MILLIERS, taux en %)."""
+    f = os.path.join(RAW, "lavoro", "Anno-2023-Dati-provinciali.xlsx")
+    fr = {"Popolazione": "Population", "Forze di lavoro": "Forces de travail", "Occupati_1": "Occupés",
+          "Occupati_2": "Occupés", "Disoccupati": "Chômeurs", "Non forze di lavoro": "Inactifs 15-64"}
+    tr = {"Maschi": "hommes", "Femmine": "femmes", "Maschi e femmine": "total", "Totale": "total",
+          "Occupati": "effectif", "Forze di lavoro": "effectif", "Persone in cerca di occupazione": "effectif",
+          "Non forze di lavoro 15-64 anni": "effectif", "Settore": "secteur", "Posizione": "position",
+          "Dipendenti": "SALARIÉS", "Indipendenti": "indépendants", "Agricoltura": "agriculture",
+          "Industria in senso stretto": "industrie", "Costruzioni": "construction", "Commercio": "commerce",
+          "Altri servizi": "autres services"}
+    out = None
+    for sh, lab in fr.items():
+        d = pd.read_excel(f, sheet_name=sh, header=None)
+        h1 = d.iloc[2].ffill() if sh == "Popolazione" else d.iloc[3].ffill()
+        h2 = d.iloc[3] if sh == "Popolazione" else d.iloc[4]
+        body = d.iloc[5:] if sh == "Popolazione" else d.iloc[6:]
+        body = body[body[0].notna() & body.iloc[:, 1:].notna().any(axis=1)]
+        body = body[~body[0].astype(str).str.startswith(("Fonte", "(", "Nota"))]
+        cols = {}
+        for j in range(1, d.shape[1]):
+            a = str(h1[j]).strip() if pd.notna(h1[j]) else ""
+            b = str(h2[j]).strip() if pd.notna(h2[j]) else ""
+            if body[j].isna().all():
+                continue
+            is_rate = "asso" in a
+            a = {"Tasso di attività (15-64 anni)": "taux d'activité 15-64", "Tasso di occupazione (15-64 anni)":
+                 "taux d'emploi 15-64", "Tasso di disoccupazione": "taux de chômage",
+                 "Tasso di inattività (15-64 anni)": "taux d'inactivité 15-64"}.get(a, a)
+            name = f"{lab} - {tr.get(a, a) if not is_rate else a} - {tr.get(b, b)}".replace(" - effectif", "")
+            if sh == "Popolazione":  # blocs de 5 colonnes : hommes, femmes, total (en-têtes fusionnés décalés)
+                sexe = ["hommes", "femmes", "total"][(j - 1) // 5]
+                name = f"Population - {sexe} - {b.replace('55 e oltre', '55 ans et +').replace('Totale', 'tous âges')}"
+            if sh == "Occupati_2" and a in ("Totale",):
+                continue
+            name += " (%)" if is_rate else " (milliers)"
+            cols[name] = body[j].values
+        t = pd.DataFrame(cols)
+        t.insert(0, "Territoire", body[0].astype(str).str.strip().values)
+        t = t.drop_duplicates("Territoire")
+        out = t if out is None else out.merge(t, on="Territoire", how="outer", sort=False)
+    out.insert(1, "Niveau", out["Territoire"].map(lambda v: "Italie" if v.upper() == "ITALIA" else
+                                                    ("Région / répartition" if v == v.upper() else "Province")))
+    return out
+
+
 # ---------------------------------------------------------------- tourisme
 def tourisme_annuel():
     d = pd.read_excel(os.path.join(RAW, "turismo", "2_dati_comunali.xlsx"), sheet_name=0, header=None,
@@ -443,7 +512,7 @@ def _prov_join(x, cap, prov, cols, suffix):
     return _join(x, m)
 
 
-def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal=None):
+def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal=None, fl=None):
     x = ref.copy()
     popcols = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     x = _join(x, pop[["Cod. ISTAT"] + popcols[-3:]])
@@ -460,6 +529,14 @@ def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal
     if pent is not None:
         x = _prov_join(x, cap, pent, ["Entreprises - TOTAL", "Entreprises - TOTAL - avec salariés",
                                       "Actifs occupés - TOTAL"], "")
+    if fl is not None:
+        f2 = fl[fl["Niveau"] == "Province"].copy()
+        f2["Année"] = 2023
+        keep = [c for c in f2.columns if c in ("Forces de travail - total (milliers)", "Occupés - total (milliers)",
+                                               "Occupés - position - SALARIÉS (milliers)",
+                                               "Occupés - position - indépendants (milliers)",
+                                               "Chômeurs - total (milliers)")]
+        x = _prov_join(x, cap, f2, keep, " - enquête FdL")
     if psal is not None:
         x = _prov_join(x, cap, psal, [c for c in psal.columns if c.startswith("Salariés - TOTAL - total")], "")
     ya = asi["Année"].max()
@@ -506,6 +583,18 @@ def write(sheets, notes):
             ws.write(i, 0, k, bold)
             ws.write(i, 1, v, wrap)
         for name, df in sheets.items():
+            if df.attrs.get("raw"):
+                sh = wb.add_worksheet(name)
+                sh.set_column(0, 0, 45, body)
+                sh.set_column(1, df.shape[1], 13, body)
+                for i, row in enumerate(df.itertuples(index=False)):
+                    for j, v in enumerate(row):
+                        if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                            if isinstance(v, str) and v.startswith(("===", "Source ISTAT")):
+                                sh.write(i, j, v, title if v.startswith("Source") else bold)
+                            else:
+                                sh.write(i, j, v)
+                continue
             df = df.copy()
             df.to_excel(xw, sheet_name=name, index=False, startrow=1, header=False)
             sh = xw.sheets[name]
@@ -541,7 +630,8 @@ def main():
     ptai = prov_taille()
     psq = prov_salaries_qualif()
     pss = prov_salaries_secteur()
-    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro, pent, pss)
+    fl23 = forze_lavoro_prov()
+    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro, pent, pss, fl23)
     popy = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     sheets = {
         "Synthèse communes": syn,
@@ -558,6 +648,12 @@ def main():
         "PROV Entreprises forme jur.": pfj,
         "PROV Salariés secteur 12-17": pss,
         "PROV Salariés qualif. 12-17": psq,
+        "PROV Marché travail 2023": fl23,
+        "PROV Forze lavoro 2023 brut": raw_stack(os.path.join(RAW, "lavoro", "Anno-2023-Dati-provinciali.xlsx")),
+        "Grandi comuni lavoro 18-23": raw_stack(os.path.join(RAW, "lavoro",
+                                                             "Anni-2018-2023-Dati-grandi-comuni-offerta-di-lavoro.xlsx")),
+        "ASIA tavole Italie 2022": raw_stack(os.path.join(RAW, "lavoro", "tavole-diffusione-2022.xlsx")),
+        "ASIA tavole Italie 2023": raw_stack(os.path.join(RAW, "imprese", "Tavole", "tavole-diffusione-2023.xlsx")),
         "Tourisme annuel 2014-2025": tann,
         "Tourisme mensuel 2022-2025": tmen,
         "Capacité hébergement": cap,
@@ -622,6 +718,21 @@ def main():
                                     "SALARIÉS (dipendenti, moyenne annuelle) des établissements par province, par "
                                     "section Ateco et sexe, et par qualification (dirigeant, cadre, employé, ouvrier, "
                                     "apprenti). ISTAT n'a diffusé cette série que pour 2012-2017."),
+        ("PROV Marché travail 2023", "Même source que l'onglet brut ci-dessous, mise en tableau : une ligne par région "
+                                     "et province, toutes feuilles côte à côte. ATTENTION : effectifs EN MILLIERS "
+                                     "(ex. Palermo : forces de travail 404,049 = 404 049 personnes ; occupés 335,191). "
+                                     "Forces de travail = occupés + chômeurs. Enquête par sondage (moyenne annuelle 2023), "
+                                     "lieu de RÉSIDENCE."),
+        ("PROV Forze lavoro 2023 brut", "ISTAT, communiqué 'Il mercato del lavoro - IV trimestre 2023', fichier "
+                                   "Anno-2023-Dati-provinciali.xlsx (enquête Forze di lavoro, moyenne 2023) : population, "
+                                   "forces de travail, occupés (par sexe, âge, secteur, position), chômeurs, inactifs, taux, "
+                                   "par région et province, EN MILLIERS. Feuilles ISTAT empilées telles quelles."),
+        ("Grandi comuni lavoro 18-23", "Même communiqué, fichier Anni-2018-2023-Dati-grandi-comuni-offerta-di-lavoro.xlsx : "
+                                       "occupés, chômeurs, inactifs 2018-2023 (total/hommes/femmes) pour les grandes "
+                                       "communes, EN MILLIERS (enquête par sondage)."),
+        ("ASIA tavole Italie 2022/2023", "ISTAT, 'Registro statistico delle imprese attive' 2022 et 2023 "
+                                         "(tavole-diffusione-2022/2023.xlsx) : entreprises, actifs, salariés par taille, "
+                                         "secteur, groupes, régions. Niveau Italie / régions. Feuilles empilées telles quelles."),
         ("Synthèse : colonnes PROVINCE", "Les colonnes préfixées 'PROVINCE :' dans la Synthèse répètent pour chaque "
                                          "commune la valeur de SA province (même chiffre pour toutes les communes d'une "
                                          "province) ; ce ne sont pas des valeurs communales."),
