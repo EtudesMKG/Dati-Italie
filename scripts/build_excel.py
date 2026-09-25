@@ -137,6 +137,97 @@ def asia():
     return w.rename(columns={"REF_AREA": "Cod. ISTAT", "TIME_PERIOD": "Année"}).sort_values(["Cod. ISTAT", "Année"])
 
 
+def _sdmx_wide(name, flow, colkey, labels=None, index=("REF_AREA", "TIME_PERIOD")):
+    """CSV SDMX brut -> tableau large par commune (codes 6 chiffres), colonnes = libellés ISTAT."""
+    p = os.path.join(RAW, "sdmx", name + ".csv")
+    if not os.path.exists(p):
+        return None
+    d = pd.read_csv(p, dtype=str)
+    d = d[d.REF_AREA.str.fullmatch(r"\d{6}", na=False)].copy()
+    dims, cls = s.structure(flow)
+    cl = {dim: cls.get(c, {}) for dim, _, c in dims}
+    d["col"] = d.apply(colkey if callable(colkey) else (lambda r: cl[colkey].get(r[colkey], r[colkey])), axis=1)
+    d["v"] = d.OBS_VALUE.map(num).astype(object)
+    w = d.pivot_table(index=list(index), columns="col", values="v", aggfunc="first")
+    if labels:
+        w = w.reindex(columns=[c for c in labels if c in w.columns])
+    w = w.reset_index()
+    w.insert(1, "Commune", w.REF_AREA.map(cl["REF_AREA"]))
+    return w.rename(columns={"REF_AREA": "Cod. ISTAT", "TIME_PERIOD": "Année"}).sort_values(["Cod. ISTAT", "Année"])
+
+
+def occupes_recensement():
+    """Recensement permanent : actifs occupés résidents 15+ (total / salariés / indépendants, par sexe)."""
+    stat = {"99": "Actifs occupés", "9": "dont salariés (dipendenti)", "22": "dont indépendants"}
+    sexe = {"T": "total", "M": "hommes", "F": "femmes"}
+    order = [f"{v} - {x}" for x in sexe.values() for v in stat.values()]
+    return _sdmx_wide("occupati_posizione_comuni", "DF_DCSS_EMPLP_1_COM",
+                      lambda r: f"{stat[r.EMPLOYMENT_STATUS]} - {sexe[r.GENDER]}", order)
+
+
+def occupes_secteur():
+    lab = {"0010": "Total actifs occupés", "A": "A - Agriculture, sylviculture, pêche",
+           "0011": "B-F - Industrie (y c. construction)", "0026": "G,I - Commerce, hôtels et restaurants",
+           "0091": "H,J - Transport, entreposage, information et communication",
+           "0092": "K-N - Finance, assurance, immobilier, activités spécialisées, services aux entreprises",
+           "0093": "O-U - Autres activités (administration, enseignement, santé, autres services)"}
+    return _sdmx_wide("occupati_settore_comuni", "DF_DCSS_EMPLP_2_COM",
+                      lambda r: lab.get(r.BRANCH_ECON_ACT, r.BRANCH_ECON_ACT), list(lab.values()))
+
+
+def condition_pro():
+    """Recensement permanent : population 15+ par condition professionnelle, 2018-2024."""
+    fs = sorted(glob.glob(os.path.join(RAW, "sdmx", "condizione_professionale_20*.csv")))
+    if not fs:
+        return None
+    d = pd.concat([pd.read_csv(f, dtype=str) for f in fs], ignore_index=True)
+    d = d.drop_duplicates(["REF_AREA", "CUR_ACT_STAT", "TIME_PERIOD"])
+    d.to_csv(os.path.join(RAW, "sdmx", "condizione_professionale_all.csv"), index=False)
+    lab = {"99": "Population 15 ans et +", "22": "Forces de travail (actifs)", "1": "Actifs occupés",
+           "12": "Chômeurs (en recherche d'emploi)", "23": "Inactifs (hors forces de travail)"}
+    return _sdmx_wide("condizione_professionale_all", "DF_DCSS_ISTR_LAV_PEN_2_TV_3",
+                      lambda r: lab.get(r.CUR_ACT_STAT, r.CUR_ACT_STAT), list(lab.values()))
+
+
+def asia_sections():
+    lab = {"0010": "TOTAL toutes activités"}
+    for k, v in [("A", "Agriculture"), ("B", "Extraction"), ("C", "Industrie manufacturière"), ("D", "Énergie"),
+                 ("E", "Eau, déchets"), ("F", "Construction"), ("G", "Commerce"), ("H", "Transport, entreposage"),
+                 ("I", "Hébergement, restauration"), ("J", "Information, communication"), ("K", "Finance, assurance"),
+                 ("L", "Immobilier"), ("M", "Activités spécialisées, scientifiques, techniques"),
+                 ("N", "Services administratifs et de soutien"), ("P", "Enseignement"), ("Q", "Santé, action sociale"),
+                 ("R", "Arts, spectacles, loisirs"), ("S", "Autres services")]:
+        lab[k] = f"{k} - {v}"
+    mes = {"LU": "Établissements (unités locales)", "LUEMPDAA": "Actifs occupés (addetti)"}
+    order = [f"{mes[m]} - {v}" for m in mes for v in lab.values()]
+    return _sdmx_wide("asia_ul_sezioni_2023", "183_285_DF_DICA_ASIAULP_7",
+                      lambda r: f"{mes[r.DATA_TYPE]} - {lab.get(r.ECON_ACTIVITY_NACE_2007, r.ECON_ACTIVITY_NACE_2007)}",
+                      order)
+
+
+def frame2017():
+    """ISTAT Frame territoriale 2017 : établissements, actifs, SALARIÉS, CA, VA par commune (4 blocs ISTAT)."""
+    f = os.path.join(RAW, "imprese", "dati_comunali_2017_DPCM_covid19.xlsx")
+    blocs = {"Settori attivi_industria": "Industrie secteurs 'actifs'",
+             "settori sospesi industria": "Industrie secteurs 'suspendus'",
+             "settori attivi servizi": "Services secteurs 'actifs'",
+             "settori sospesi servizi": "Services secteurs 'suspendus'"}
+    mes = {"Unita_locali": "Établissements", "Numero Addetti": "Actifs occupés (addetti)",
+           "Numero Dipendenti": "Salariés (dipendenti)", "Fatturato\n(valori in euro)": "Chiffre d'affaires (€)",
+           "Valore_aggiunto\n(valori in euro)": "Valeur ajoutée (€)"}
+    out = None
+    for sh, b in blocs.items():
+        d = pd.read_excel(f, sheet_name=sh, dtype=str).iloc[:, :10]
+        d = d[d.codice_comune.str.fullmatch(r"\d{6}", na=False)]
+        x = d[["codice_comune", "Denominazione_comune", "Denominazione_provincia", "Denominazione_regione"]].copy()
+        for k, v in mes.items():
+            x[f"{b} - {v}"] = d[k].map(num)
+        out = x if out is None else out.merge(x, on=["codice_comune", "Denominazione_comune", "Denominazione_provincia",
+                                                     "Denominazione_regione"], how="outer")
+    return out.rename(columns={"codice_comune": "Cod. ISTAT", "Denominazione_comune": "Commune",
+                               "Denominazione_provincia": "Province", "Denominazione_regione": "Région"})
+
+
 # ---------------------------------------------------------------- tourisme
 def tourisme_annuel():
     d = pd.read_excel(os.path.join(RAW, "turismo", "2_dati_comunali.xlsx"), sheet_name=0, header=None,
@@ -247,13 +338,23 @@ def _join(x, df):
     return pd.concat([x, a[cols]], axis=1)
 
 
-def synthese(ref, pop, asi, tann, cap, mus):
+def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None):
     x = ref.copy()
     popcols = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     x = _join(x, pop[["Cod. ISTAT"] + popcols[-3:]])
+    if cpro is not None:
+        yp = cpro["Année"].max()
+        c = cpro[cpro["Année"] == yp].drop(columns=["Commune", "Année"])
+        c.columns = ["Cod. ISTAT"] + [f"Recensement : {k} ({yp})" for k in c.columns[1:]]
+        x = _join(x, c)
+    if occ is not None:
+        yo = occ["Année"].max()
+        o = occ[occ["Année"] == yo]
+        oc = [c for c in o.columns if c.endswith("- total")]
+        x = _join(x, o[["Cod. ISTAT"] + oc].rename(columns={c: f"Recensement : {c} ({yo})" for c in oc}))
     ya = asi["Année"].max()
     a = asi[asi["Année"] == ya].drop(columns=["Commune", "Année"])
-    a.columns = ["Cod. ISTAT"] + [f"{c} ({ya})" for c in a.columns[1:]]
+    a.columns = ["Cod. ISTAT"] + [f"ASIA : {c} ({ya})" for c in a.columns[1:]]
     x = _join(x, a)
     for y in sorted(tann["Année"].unique())[-2:]:
         t = tann[tann["Année"] == y]
@@ -320,13 +421,23 @@ def main():
     prov = provenance()
     mus = musees()
     voy = voyages()
-    syn = synthese(ref, pop, asi, tann, cap, mus)
+    occ = occupes_recensement()
+    occsec = occupes_secteur()
+    cpro = condition_pro()
+    asec = asia_sections()
+    fr17 = frame2017()
+    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro)
     popy = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     sheets = {
         "Synthèse communes": syn,
         "Démographie": pop,
         "Bilan démographique": bil,
-        "Entreprises-Emploi (ASIA)": asi,
+        "Actifs occupés 2021 (recens.)": occ,
+        "Actifs par secteur 2021": occsec,
+        "Actifs occupés 2018-2024": cpro,
+        "Établissements par secteur 2023": asec,
+        "Établ. & actifs 2012-2023 ASIA": asi,
+        "Salariés-CA par commune 2017": fr17,
         "Tourisme annuel 2014-2025": tann,
         "Tourisme mensuel 2022-2025": tmen,
         "Capacité hébergement": cap,
@@ -338,6 +449,7 @@ def main():
               "viaggi_vacanze": "Voyages de vacances"}
     for k, v in voy.items():
         sheets[labels[k]] = v
+    sheets = {k: v for k, v in sheets.items() if v is not None}
     notes = [
         ("Source", "Exclusivement ISTAT (Istituto Nazionale di Statistica). Aucun chiffre estimé, calculé ou "
                    "complété par nous : valeurs reprises telles que publiées. Les marques ISTAT sont conservées "
@@ -354,12 +466,35 @@ def main():
                         "et sexe = sommes des âges simples ISTAT du dernier millésime."),
         ("Bilan démographique", "ISTAT demo.istat.it, bilan démographique par commune (naissances, décès, "
                                 "migrations, ménages) 2019-2025, colonnes 'Totale'."),
-        ("Entreprises-Emploi (ASIA)", "ISTAT, Registre statistique des unités locales des entreprises actives (ASIA-UL), "
-                                      "flux SDMX 183_285_DF_DICA_ASIAULP_7, 2012-2023 (dernier millésime publié). "
-                                      "LIMITE : au niveau communal ISTAT publie le nombre d'UNITÉS LOCALES (établissements) "
-                                      "et d'ACTIFS OCCUPÉS ('addetti' = salariés + indépendants, moyenne annuelle). "
-                                      "Le nombre d'entreprises (sièges) et le nombre de salariés seuls ('dipendenti') "
-                                      "ne sont pas diffusés par ISTAT à l'échelle communale (seulement province)."),
+        ("EMPLOI - lecture", "Deux mesures ISTAT complémentaires : (1) LIEU DE RÉSIDENCE : personnes de 15 ans et + "
+                             "résidant dans la commune et ayant un emploi (recensement permanent) ; (2) LIEU DE TRAVAIL : "
+                             "emplois localisés dans les établissements d'entreprises situés dans la commune (registre ASIA)."),
+        ("Actifs occupés 2021 (recens.)", "ISTAT, Censimento permanente della popolazione 2021, flux DF_DCSS_EMPLP_1_COM : "
+                                          "actifs occupés résidents 15+ par commune, dont salariés (dipendenti) et "
+                                          "indépendants, par sexe. Dernier millésime communal publié. Décimales = "
+                                          "valeurs ISTAT issues d'estimation (recensement par échantillon/registres)."),
+        ("Actifs par secteur 2021", "Même recensement, flux DF_DCSS_EMPLP_2_COM : actifs occupés résidents par grand "
+                                    "secteur d'activité (7 regroupements ISTAT)."),
+        ("Actifs occupés 2018-2024", "Recensement permanent, flux DF_DCSS_ISTR_LAV_PEN_2_TV_3 : population résidente "
+                                     "15+ par condition professionnelle, chaque année 2018-2024 : actifs occupés, chômeurs, "
+                                     "forces de travail, inactifs. Série annuelle la plus récente sur l'emploi par commune."),
+        ("Établissements par secteur 2023", "ISTAT, Registre ASIA unités locales 2023 (flux 183_285_DF_DICA_ASIAULP_7) : "
+                                            "nombre d'établissements et d'actifs occupés (addetti = salariés + "
+                                            "indépendants, moyenne annuelle) par commune, TOUTES sections Ateco (A-S)."),
+        ("Établ. & actifs 2012-2023 ASIA", "Même registre, série 2012-2023 : total toutes activités + hébergement/"
+                                           "restauration (I, 55, 56)."),
+        ("Salariés-CA par commune 2017", "ISTAT, Registre étendu 'Frame territoriale' 2017 (publication ISTAT avril 2020 "
+                                         "'Dati comunali su imprese, addetti e risultati economici', fichier "
+                                         "dati_comunali_2017_DPCM_covid19.xlsx) : SEULE source ISTAT donnant par commune "
+                                         "les SALARIÉS (dipendenti), les actifs, le chiffre d'affaires et la valeur ajoutée. "
+                                         "ISTAT publie 4 blocs séparés (industrie/services x secteurs 'actifs'/'suspendus' "
+                                         "lors du confinement de mars 2020) ; ils sont repris tels quels, non additionnés. "
+                                         "Champ : industrie, construction, services marchands (hors agriculture, finance/"
+                                         "assurance, administration publique). '*' = secret statistique (< 3 unités)."),
+        ("Nombre d'entreprises", "ISTAT ne publie PAS le nombre d'entreprises (sièges sociaux) par commune : le registre "
+                                 "ASIA-entreprises est diffusé au niveau provincial au plus fin. Au niveau communal, "
+                                 "l'indicateur ISTAT est le nombre d'établissements (unités locales), qui compte chaque "
+                                 "site d'activité d'une entreprise situé dans la commune."),
         ("Tourisme annuel 2014-2025", "ISTAT, Movimento dei clienti negli esercizi ricettivi - fichier 'Turismo - file già "
                                       "pronti' (esploradati.istat.it/databrowser/DWL/Servizi/DCSC_Occupancy_in_collective_"
                                       "accommodation.zip, version juillet 2026). Arrivées et nuitées par commune, hôtellerie / "
