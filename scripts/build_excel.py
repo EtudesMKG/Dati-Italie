@@ -228,6 +228,97 @@ def frame2017():
                                "Denominazione_provincia": "Province", "Denominazione_regione": "Région"})
 
 
+# ---------------------------------------------------------------- entreprises / salariés par PROVINCE
+def _niveau(code):
+    if code == "IT":
+        return "Italie"
+    if len(code) == 3:
+        return "Macro-région"
+    if len(code) == 4:
+        return "Région"
+    if len(code) == 5:
+        return "Province"
+    return "Autre"
+
+
+def _prov_wide(pattern, flow, colfun, order=None, keep=None):
+    fs = sorted(glob.glob(os.path.join(RAW, "sdmx", pattern)))
+    if not fs:
+        return None
+    d = pd.concat([pd.read_csv(f, dtype=str) for f in fs], ignore_index=True)
+    if keep is not None:
+        d = d[keep(d)]
+    dims, cls = s.structure(flow)
+    cl = {dim: cls.get(c, {}) for dim, _, c in dims}
+    keys = [x for x, _, _ in dims if x in d.columns] + ["TIME_PERIOD"]
+    d = d.drop_duplicates(keys)
+    d["col"] = d.apply(lambda r: colfun(r, cl), axis=1)
+    d["v"] = d.OBS_VALUE.map(num).astype(object)
+    w = d.pivot_table(index=["REF_AREA", "TIME_PERIOD"], columns="col", values="v", aggfunc="first")
+    if order:
+        w = w.reindex(columns=[c for c in order if c in w.columns] + [c for c in w.columns if c not in order])
+    w = w.dropna(axis=1, how="all").reset_index()
+    w.insert(1, "Territoire", w.REF_AREA.map(cl["REF_AREA"]))
+    w.insert(2, "Niveau", w.REF_AREA.map(_niveau))
+    w = w.rename(columns={"REF_AREA": "Code territoire ISTAT", "TIME_PERIOD": "Année"})
+    lvl = {"Italie": 0, "Macro-région": 1, "Région": 2, "Province": 3, "Autre": 4}
+    return w.sort_values(["Année", "Niveau", "Code territoire ISTAT"], key=lambda c: c.map(lvl) if c.name == "Niveau" else c)
+
+
+SECT_FR = {"0010": "TOTAL", "B": "B Extraction", "C": "C Industrie manuf.", "D": "D Énergie", "E": "E Eau-déchets",
+           "F": "F Construction", "G": "G Commerce", "H": "H Transport", "I": "I Hébergement-restauration",
+           "55": "55 Hébergement", "56": "56 Restauration", "J": "J Info-communication", "K": "K Finance-assurance",
+           "L": "L Immobilier", "M": "M Act. spécialisées", "N": "N Services admin./soutien", "P": "P Enseignement",
+           "Q": "Q Santé-social", "R": "R Arts-loisirs", "S": "S Autres services"}
+MES_FR = {"AENTN": "Entreprises", "AENTEMPDAA": "Actifs occupés", "LUEMPYAA": "Salariés (dipendenti)"}
+
+
+def prov_entreprises():
+    sal = {"9": "", "1": " - avec salariés", "0": " - sans salarié"}
+    order = [f"{MES_FR[m]} - {v}{sal[e]}" for v in SECT_FR.values() for m in ("AENTN", "AENTEMPDAA")
+             for e in ("9", "1", "0")]
+    return _prov_wide("prov_imprese_settore_*.csv", "183_277_DF_DICA_ASIAUE1P_4",
+                      lambda r, cl: f"{MES_FR[r.DATA_TYPE]} - {SECT_FR.get(r.ECON_ACTIVITY_NACE_2007, r.ECON_ACTIVITY_NACE_2007)}"
+                                    f"{sal.get(r.Y_ENTER_WITH_EMPLOYEES, '')}", order)
+
+
+def prov_forme_juridique():
+    return _prov_wide("prov_imprese_forma_giuridica.csv", "183_277_DF_DICA_ASIAUE1P_4",
+                      lambda r, cl: f"{MES_FR[r.DATA_TYPE]} - {cl['LEGAL_FORM'].get(r.LEGAL_FORM, r.LEGAL_FORM)}")
+
+
+def prov_taille():
+    tail = {"TOTAL": "toutes tailles", "W0_9": "0-9 actifs", "W10_49": "10-49 actifs", "W50_249": "50-249 actifs",
+            "W_GE250": "250 actifs et +"}
+    art = {"9": "", "1": " - dont artisanales"}
+    order = [f"{MES_FR[m]} - {t}{a}" for m in ("AENTN", "AENTEMPDAA") for t in tail.values() for a in art.values()]
+    return _prov_wide("prov_imprese_classe_addetti.csv", "183_277_DF_DICA_ASIAUE1P_5",
+                      lambda r, cl: f"{MES_FR[r.DATA_TYPE]} - {tail[r.PERS_EMPL_SIZE_CLASS]}{art[r.Y_CRAFTMEN]}", order,
+                      keep=lambda d: (d.Y_ENTER_WITH_EMPLOYEES == "9") & d.Y_CRAFTMEN.isin(["9", "1"]))
+
+
+def prov_salaries_qualif():
+    q = {"99": "TOTAL", "2": "dirigeants", "3": "cadres (quadri)", "4": "employés (impiegati)",
+         "6": "ouvriers (operai)", "7": "apprentis", "27": "autres salariés"}
+    return _prov_wide("prov_dipendenti_qualifica.csv", "183_332_DF_DICA_ASIAULOCCP_3",
+                      lambda r, cl: f"Salariés - {q.get(r.PROF_STATUS, cl['PROF_STATUS'].get(r.PROF_STATUS, r.PROF_STATUS))}",
+                      [f"Salariés - {v}" for v in q.values()])
+
+
+def prov_salaries_secteur():
+    sx = {"9": "total", "1": "hommes", "2": "femmes", "3": "sexe non indiqué"}
+    return _prov_wide("prov_dipendenti_settore_*.csv", "183_332_DF_DICA_ASIAULOCCP_4",
+                      lambda r, cl: f"Salariés - {SECT_FR.get(r.ECON_ACTIVITY_NACE_2007, r.ECON_ACTIVITY_NACE_2007)} - "
+                                    f"{sx.get(getattr(r, 'SEX', '9'), getattr(r, 'SEX', ''))}")
+
+
+def _norm(t):
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().lower()
+    t = re.sub(r"[\s'-]+", " ", t.split("/")[0]).strip()
+    return {"valle d aosta": "aosta"}.get(t, t)
+
+
 # ---------------------------------------------------------------- tourisme
 def tourisme_annuel():
     d = pd.read_excel(os.path.join(RAW, "turismo", "2_dati_comunali.xlsx"), sheet_name=0, header=None,
@@ -338,7 +429,21 @@ def _join(x, df):
     return pd.concat([x, a[cols]], axis=1)
 
 
-def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None):
+def _prov_join(x, cap, prov, cols, suffix):
+    """Rattache une valeur PROVINCIALE à chaque commune (via la province 2025 de la commune, fichier capacité ISTAT)."""
+    if prov is None:
+        return x
+    yp = prov["Année"].max()
+    pv = prov[(prov["Niveau"] == "Province") & (prov["Année"] == yp)].copy()
+    pv["k"] = pv["Territoire"].map(_norm)
+    c25 = cap[cap["Année"] == cap["Année"].max()][["Cod. ISTAT", "Province"]].drop_duplicates("Cod. ISTAT")
+    c25["k"] = c25["Province"].map(_norm)
+    m = c25.merge(pv[["k"] + cols], on="k", how="left").drop(columns=["Province", "k"])
+    m = m.rename(columns={c: f"PROVINCE : {c} ({yp}){suffix}" for c in cols})
+    return _join(x, m)
+
+
+def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal=None):
     x = ref.copy()
     popcols = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     x = _join(x, pop[["Cod. ISTAT"] + popcols[-3:]])
@@ -352,6 +457,11 @@ def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None):
         o = occ[occ["Année"] == yo]
         oc = [c for c in o.columns if c.endswith("- total")]
         x = _join(x, o[["Cod. ISTAT"] + oc].rename(columns={c: f"Recensement : {c} ({yo})" for c in oc}))
+    if pent is not None:
+        x = _prov_join(x, cap, pent, ["Entreprises - TOTAL", "Entreprises - TOTAL - avec salariés",
+                                      "Actifs occupés - TOTAL"], "")
+    if psal is not None:
+        x = _prov_join(x, cap, psal, [c for c in psal.columns if c.startswith("Salariés - TOTAL - total")], "")
     ya = asi["Année"].max()
     a = asi[asi["Année"] == ya].drop(columns=["Commune", "Année"])
     a.columns = ["Cod. ISTAT"] + [f"ASIA : {c} ({ya})" for c in a.columns[1:]]
@@ -426,7 +536,12 @@ def main():
     cpro = condition_pro()
     asec = asia_sections()
     fr17 = frame2017()
-    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro)
+    pent = prov_entreprises()
+    pfj = prov_forme_juridique()
+    ptai = prov_taille()
+    psq = prov_salaries_qualif()
+    pss = prov_salaries_secteur()
+    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro, pent, pss)
     popy = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     sheets = {
         "Synthèse communes": syn,
@@ -438,6 +553,11 @@ def main():
         "Établissements par secteur 2023": asec,
         "Établ. & actifs 2012-2023 ASIA": asi,
         "Salariés-CA par commune 2017": fr17,
+        "PROV Entreprises 2012-2024": pent,
+        "PROV Entreprises taille": ptai,
+        "PROV Entreprises forme jur.": pfj,
+        "PROV Salariés secteur 12-17": pss,
+        "PROV Salariés qualif. 12-17": psq,
         "Tourisme annuel 2014-2025": tann,
         "Tourisme mensuel 2022-2025": tmen,
         "Capacité hébergement": cap,
@@ -491,6 +611,20 @@ def main():
                                          "lors du confinement de mars 2020) ; ils sont repris tels quels, non additionnés. "
                                          "Champ : industrie, construction, services marchands (hors agriculture, finance/"
                                          "assurance, administration publique). '*' = secret statistique (< 3 unités)."),
+        ("PROV Entreprises 2012-2024", "ISTAT, Registre ASIA-entreprises (flux 183_277_DF_DICA_ASIAUE1P_4), niveau "
+                                       "PROVINCIAL (plus fin diffusé) : nombre d'ENTREPRISES actives (sièges) et actifs "
+                                       "occupés, par section Ateco, total / avec salariés / sans salarié, 2012-2024. "
+                                       "Lignes Italie, macro-régions et régions incluses (colonne Niveau)."),
+        ("PROV Entreprises taille / forme jur.", "Même registre (flux ASIAUE1P_5 et ASIAUE1P_4) : entreprises et actifs "
+                                                 "par classe de taille (0-9, 10-49, 50-249, 250+ actifs) et par forme "
+                                                 "juridique, par province."),
+        ("PROV Salariés 2012-2017", "ISTAT, ASIA unités locales - occupation (flux 183_332_DF_DICA_ASIAULOCCP_3 et _4) : "
+                                    "SALARIÉS (dipendenti, moyenne annuelle) des établissements par province, par "
+                                    "section Ateco et sexe, et par qualification (dirigeant, cadre, employé, ouvrier, "
+                                    "apprenti). ISTAT n'a diffusé cette série que pour 2012-2017."),
+        ("Synthèse : colonnes PROVINCE", "Les colonnes préfixées 'PROVINCE :' dans la Synthèse répètent pour chaque "
+                                         "commune la valeur de SA province (même chiffre pour toutes les communes d'une "
+                                         "province) ; ce ne sont pas des valeurs communales."),
         ("Nombre d'entreprises", "ISTAT ne publie PAS le nombre d'entreprises (sièges sociaux) par commune : le registre "
                                  "ASIA-entreprises est diffusé au niveau provincial au plus fin. Au niveau communal, "
                                  "l'indicateur ISTAT est le nombre d'établissements (unités locales), qui compte chaque "
