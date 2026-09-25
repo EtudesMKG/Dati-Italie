@@ -53,6 +53,8 @@ def referentiel():
         "Région": e["Denominazione Regione"],
         "Répartition": e["Ripartizione geografica"],
         "Chef-lieu (1=oui)": e[[c for c in e.columns if c.startswith("Flag Comune capoluogo")][0]],
+        # code ISTAT en vigueur 2017-2025 (recodification Sardaigne 2026) : clé utilisée par les sources statistiques
+        "Cod. ISTAT 2017-2025": e[[c for c in e.columns if "dal 2017" in c][0]].str.zfill(6),
     })
     leg = pd.read_excel(os.path.join(RAW, "turismo", "DCSC_turistical_area_TB.xls"), "Legenda comuni", dtype=str)
     leg.columns = [c.strip() for c in leg.columns]
@@ -66,7 +68,7 @@ def referentiel():
     })
     keep = ["Cod. ISTAT", "Commune littorale", "Commune côtière", "Degré d'urbanisation",
             "Catégorie touristique prévalente", "Brand touristique"]
-    return ref.merge(leg[keep], on="Cod. ISTAT", how="left")
+    return _join(ref, leg[keep])
 
 
 # ---------------------------------------------------------------- démographie
@@ -234,14 +236,25 @@ def voyages():
 
 
 # ---------------------------------------------------------------- synthèse
+def _join(x, df):
+    """Jointure sur le code actuel, à défaut sur le code 2017-2025 (communes recodifiées en 2026)."""
+    df = df.drop_duplicates("Cod. ISTAT")
+    a = x[["Cod. ISTAT"]].merge(df, on="Cod. ISTAT", how="left").set_index(x.index)
+    b = x[["Cod. ISTAT 2017-2025"]].merge(df.rename(columns={"Cod. ISTAT": "Cod. ISTAT 2017-2025"}),
+                                          on="Cod. ISTAT 2017-2025", how="left").set_index(x.index)
+    cols = [c for c in df.columns if c != "Cod. ISTAT"]
+    a[cols] = a[cols].astype(object).where(a[cols].notna(), b[cols].astype(object))
+    return pd.concat([x, a[cols]], axis=1)
+
+
 def synthese(ref, pop, asi, tann, cap, mus):
     x = ref.copy()
     popcols = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
-    x = x.merge(pop[["Cod. ISTAT"] + popcols[-3:]], on="Cod. ISTAT", how="left")
+    x = _join(x, pop[["Cod. ISTAT"] + popcols[-3:]])
     ya = asi["Année"].max()
     a = asi[asi["Année"] == ya].drop(columns=["Commune", "Année"])
     a.columns = ["Cod. ISTAT"] + [f"{c} ({ya})" for c in a.columns[1:]]
-    x = x.merge(a, on="Cod. ISTAT", how="left")
+    x = _join(x, a)
     for y in sorted(tann["Année"].unique())[-2:]:
         t = tann[tann["Année"] == y]
         cols = ["Arrivées - Total hébergements - Total", "Nuitées - Total hébergements - Total",
@@ -250,16 +263,16 @@ def synthese(ref, pop, asi, tann, cap, mus):
                 "Arrivées - Total hébergements - Résidents Italie",
                 "Arrivées - Total hébergements - Non-résidents (étrangers)"]
         t = t[["Cod. ISTAT"] + cols].rename(columns={c: f"{c} ({y})" for c in cols})
-        x = x.merge(t, on="Cod. ISTAT", how="left")
+        x = _join(x, t)
     yc = cap["Année"].max()
     c = cap[cap["Année"] == yc]
     ccols = [k for k in c.columns if k.startswith("totale alberghi") or k.startswith("TOTALE")]
     c = c[["Cod. ISTAT"] + ccols].rename(columns={k: f"Capacité {k} ({yc})" for k in ccols})
-    x = x.merge(c, on="Cod. ISTAT", how="left")
+    x = _join(x, c)
     ym = mus["Année"].max()
     m = mus[mus["Année"] == ym].drop(columns=["Commune", "Année"])
     m.columns = ["Cod. ISTAT"] + [f"{k} ({ym})" for k in m.columns[1:]]
-    return x.merge(m, on="Cod. ISTAT", how="left")
+    return _join(x, m)
 
 
 # ---------------------------------------------------------------- écriture
@@ -373,6 +386,10 @@ def main():
                                  "2011, 2015, 2017-2020 (derniers millésimes communaux publiés par ISTAT). "
                                  "'c' = donnée confidentielle (secret statistique). Aucune autre fréquentation de sites "
                                  "touristiques n'est publiée par ISTAT au niveau communal."),
+        ("Codes communes", "ISTAT a recodifié en 2026 les communes de Sardaigne (nouvelles provinces). Les onglets de "
+                           "données gardent le code publié par ISTAT pour chaque année ; la Synthèse relie les deux via "
+                           "la colonne officielle 'Cod. ISTAT 2017-2025' de la liste ISTAT des communes. Les communes "
+                           "nées d'une fusion récente n'ont pas de données antérieures à leur création."),
         ("Reproductibilité", "Scripts dans le dépôt : scripts/fetch_sdmx.py (API SDMX ISTAT), scripts/demografia.py, "
                              "scripts/build_excel.py. Fichiers bruts téléchargés dans raw/."),
     ]
