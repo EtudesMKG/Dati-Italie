@@ -316,7 +316,7 @@ def _norm(t):
     import unicodedata
     t = unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().lower()
     t = re.sub(r"[\s'-]+", " ", t.split("/")[0]).strip()
-    return {"valle d aosta": "aosta"}.get(t, t)
+    return {"valle d aosta": "aosta", "bolzano bozen": "bolzano", "monza e brianza": "monza e della brianza"}.get(t, t)
 
 
 # ---------------------------------------------------------------- tableaux ISTAT mis en forme (repris tels quels)
@@ -386,6 +386,41 @@ def forze_lavoro_prov():
     out.insert(1, "Niveau", out["Territoire"].map(lambda v: "Italie" if v.upper() == "ITALIA" else
                                                     ("Région / répartition" if v == v.upper() else "Province")))
     return out
+
+
+def camcom_imprese():
+    """HORS ISTAT (demande explicite) : CCIAA Marche / InfoCamere, stock mensuel de sièges d'entreprises actives
+    par province/région et section Ateco, JSON-stat 2.0 décodé sans retraitement."""
+    import json
+    import itertools
+    f = os.path.join(RAW, "camcom", "Stock-Imprese-Attive-Italia-2009-2025.json")
+    if not os.path.exists(f):
+        return None
+    j = json.load(open(f, encoding="utf-8"))
+    cats = []
+    for k in j["id"]:
+        c = j["dimension"][k]["category"]
+        idx = c.get("index") or {x: i for i, x in enumerate(c["label"])}
+        keys = list(idx) if isinstance(idx, list) else sorted(idx, key=idx.get)
+        cats.append([(x, c.get("label", {}).get(x, x)) for x in keys])
+    vals = j["value"]
+    get = (lambda i: vals.get(str(i))) if isinstance(vals, dict) else (lambda i: vals[i])
+    rows = []
+    for i, combo in enumerate(itertools.product(*cats)):
+        (_, _), (g, gl), (a, al), (t, tl) = combo
+        rows.append((g, gl, tl, a, get(i)))
+    d = pd.DataFrame(rows, columns=["Code NUTS", "Territoire", "Date (fin de mois)", "ateco", "v"])
+    order = [a for a, _ in cats[2]]
+    order = ["TOTAL"] + [a for a in order if a != "TOTAL"]
+    lab = dict(cats[2])
+    w = d.pivot_table(index=["Code NUTS", "Territoire", "Date (fin de mois)"], columns="ateco", values="v",
+                      aggfunc="first").reindex(columns=order)
+    w.columns = [f"Entreprises actives - {lab[a]}" for a in w.columns]
+    w = w.reset_index()
+    w.insert(2, "Niveau", w.apply(lambda r: "Italie" if r["Code NUTS"] == "IT" else
+                                  "Région" if len(r["Code NUTS"]) != 5 or r["Territoire"].isupper() else
+                                  "Province (anciennes limites)" if "NUTS 20" in r["Territoire"] else "Province", axis=1))
+    return w.sort_values(["Code NUTS", "Date (fin de mois)"])
 
 
 # ---------------------------------------------------------------- tourisme
@@ -512,7 +547,7 @@ def _prov_join(x, cap, prov, cols, suffix):
     return _join(x, m)
 
 
-def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal=None, fl=None):
+def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal=None, fl=None, cc=None):
     x = ref.copy()
     popcols = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     x = _join(x, pop[["Cod. ISTAT"] + popcols[-3:]])
@@ -537,6 +572,9 @@ def synthese(ref, pop, asi, tann, cap, mus, occ=None, cpro=None, pent=None, psal
                                                "Occupés - position - indépendants (milliers)",
                                                "Chômeurs - total (milliers)")]
         x = _prov_join(x, cap, f2, keep, " - enquête FdL")
+    if cc is not None:
+        c2 = cc[cc["Niveau"] == "Province"].rename(columns={"Date (fin de mois)": "Année"})
+        x = _prov_join(x, cap, c2, ["Entreprises actives - TOTALE Attività Economiche"], " - CCIAA/InfoCamere")
     if psal is not None:
         x = _prov_join(x, cap, psal, [c for c in psal.columns if c.startswith("Salariés - TOTAL - total")], "")
     ya = asi["Année"].max()
@@ -631,7 +669,8 @@ def main():
     psq = prov_salaries_qualif()
     pss = prov_salaries_secteur()
     fl23 = forze_lavoro_prov()
-    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro, pent, pss, fl23)
+    ccia = camcom_imprese()
+    syn = synthese(ref, pop, asi, tann, cap, mus, occ, cpro, pent, pss, fl23, ccia)
     popy = [c for c in pop.columns if c.startswith("Pop. 1/1/")]
     sheets = {
         "Synthèse communes": syn,
@@ -649,6 +688,7 @@ def main():
         "PROV Salariés secteur 12-17": pss,
         "PROV Salariés qualif. 12-17": psq,
         "PROV Marché travail 2023": fl23,
+        "PROV Entreprises CCIAA 09-25": ccia,
         "PROV Forze lavoro 2023 brut": raw_stack(os.path.join(RAW, "lavoro", "Anno-2023-Dati-provinciali.xlsx")),
         "Grandi comuni lavoro 18-23": raw_stack(os.path.join(RAW, "lavoro",
                                                              "Anni-2018-2023-Dati-grandi-comuni-offerta-di-lavoro.xlsx")),
@@ -733,6 +773,13 @@ def main():
         ("ASIA tavole Italie 2022/2023", "ISTAT, 'Registro statistico delle imprese attive' 2022 et 2023 "
                                          "(tavole-diffusione-2022/2023.xlsx) : entreprises, actifs, salariés par taille, "
                                          "secteur, groupes, régions. Niveau Italie / régions. Feuilles empilées telles quelles."),
+        ("PROV Entreprises CCIAA 09-25", "SOURCE NON ISTAT, ajoutée à la demande : Camera di Commercio delle Marche, "
+                                         "opendata.marche.camcom.it, 'Stock Sedi di Impresa Attive' (données InfoCamere / "
+                                         "Registro delle Imprese), fichier Stock-Imprese-Attive-Italia-2009-2025.json (mis "
+                                         "à jour 2025-04-23, licence CC BY 4.0). Nombre de SIÈGES d'entreprises actives "
+                                         "inscrites au Registre des entreprises, fin de chaque mois de mars 2009 à mars "
+                                         "2025, par province/région et section Ateco. Définition différente d'ISTAT-ASIA "
+                                         "(registre administratif vs registre statistique) : chiffres non comparables."),
         ("Synthèse : colonnes PROVINCE", "Les colonnes préfixées 'PROVINCE :' dans la Synthèse répètent pour chaque "
                                          "commune la valeur de SA province (même chiffre pour toutes les communes d'une "
                                          "province) ; ce ne sont pas des valeurs communales."),
