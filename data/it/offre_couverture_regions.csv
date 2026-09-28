@@ -1,0 +1,8 @@
+region_source,etablissements,avec_cod_istat,avec_nom,avec_coord,avec_chambres,date_maj,part_jointe_cod_istat_%,date_extraction
+Campania,22293,22293,21852,0,22293,2024-04-30,100.0,2026-09-28
+Emilia-Romagna (commune de Bologna seulement),890,890,0,863,890,2025-05-20,100.0,2026-09-28
+Friuli-Venezia Giulia (structures à caractère social seulement),113,112,113,0,0,2026-09-26,99.1,2026-09-28
+Lazio (hôtels 5 étoiles de Roma seulement),44,44,44,0,44,2026-08-04,100.0,2026-09-28
+Lombardia (province Monza-Brianza seulement),196,196,196,196,0,2026-09-26,100.0,2026-09-28
+Toscana (commune de Firenze seulement),2275,2275,0,2275,0,2026-09-26,100.0,2026-09-28
+Veneto,8329,8323,8329,0,6762,2026-09-26,99.9,2026-09-28
