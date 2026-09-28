@@ -84,9 +84,8 @@ add("Actifs résidents 2018-2024", bx.condition_pro(), "ISTAT Censimento permane
 add("Actifs 2021 salariés-indép.", bx.occupes_recensement(), "ISTAT Censimento permanente (DF_DCSS_EMPLP_1_COM)",
     "https://esploradati.istat.it/", "2021", "commune (résidence)", "Décimales = estimations ISTAT.")
 irp = P("revenus_irpef_communes")
-add("Revenus IRPEF", irp[irp.annee_imposition.astype(int) >= 2019], "MEF - Dipartimento delle Finanze, IRPEF dati per comune",
-    "https://www1.finanze.gov.it/finanze/analisi_stat/public/index.php?opendata=yes", "années d'imposition 2019-2024 "
-    "(2012-2024 dans data/it/revenus_irpef_communes)", "commune (résidence du contribuable)",
+add("Revenus IRPEF", irp, "MEF - Dipartimento delle Finanze, IRPEF dati per comune",
+    "https://www1.finanze.gov.it/finanze/analisi_stat/public/index.php?opendata=yes", "années d'imposition 2012-2024", "commune (résidence du contribuable)",
     "Colonnes CALCUL_* = montant / fréquence (revenu moyen), calcul signalé. Proxy des salaires, pas un salaire horaire.")
 add("PROV Entreprises 2012-2024", bx.prov_entreprises(), "ISTAT ASIA imprese (183_277_DF_DICA_ASIAUE1P_4)",
     "https://esploradati.istat.it/", "2012-2024", "province", "Nombre d'entreprises (sièges) non diffusé par commune.")
@@ -160,6 +159,23 @@ add("Sites UNESCO", P("sites_unesco_wikidata"), "Wikidata P757 (NON OFFICIEL)", 
 S = {S_first[0]: fix(S_first[1]), **S}
 notes.insert(0, (S_first[0], "Reprise des derniers millésimes de chaque thème (ISTAT ; colonnes PROVINCE : valeurs provinciales)",
                  "voir onglets sources", "dernier millésime", "commune", "Colonnes 'PROVINCE :' = valeur de la province.", len(_syn)))
+# ---------- Lacunes (contenu de RAPPORT_LACUNES.md, intégré au classeur)
+import re as _re
+_rows, _sec = [], ""
+for _l in open(os.path.join(HERE, "rapport_lacunes.md"), encoding="utf-8"):
+    _l = _l.rstrip("\n")
+    if _l.startswith("#"):
+        _sec = _l.lstrip("# ").strip()
+        continue
+    if _l.startswith("|") and not _re.match(r"^\|[-| ]+\|$", _l):
+        _cells = [c.strip() for c in _l.strip("|").split("|")]
+        _rows.append([_sec] + _cells)
+    elif _l.strip():
+        _rows.append([_sec, _l.strip()])
+_w = max(len(r) for r in _rows)
+lac = pd.DataFrame([r + [""] * (_w - len(r)) for r in _rows], columns=["module"] + [f"col_{i}" for i in range(1, _w)])
+S["Lacunes"] = lac
+notes.append(("Lacunes", "Rapport de couverture et de lacunes", "", TODAY, "tous", "Ce qui manque, ce qui est bloqué, ce qui est payant.", len(lac)))
 # ---------- Contrôles
 C = []
 C.append(("Nombre de communes (référentiel 01/01/2026)", len(ref), 7894, len(ref) == 7894))
@@ -193,7 +209,7 @@ ctrl = pd.DataFrame(C, columns=["controle", "valeur", "reference", "resultat"])
 S["Contrôles"] = ctrl
 
 # ---------- Écriture
-path = os.path.join(OUT, "Italie_donnees_consolidees.xlsx")
+path = os.path.join(ROOT, "Italie_donnees_consolidees.xlsx")
 lis = pd.DataFrame(notes, columns=["onglet", "source", "url", "millesime", "niveau_geographique", "limites", "lignes"])
 with pd.ExcelWriter(path, engine="xlsxwriter", engine_kwargs={"options": {"strings_to_urls": False}}) as xw:
     wb = xw.book
@@ -209,7 +225,7 @@ with pd.ExcelWriter(path, engine="xlsxwriter", engine_kwargs={"options": {"strin
     ws.set_column(0, 0, 28, wrap); ws.set_column(1, 1, 45, wrap); ws.set_column(2, 2, 40, wrap)
     ws.set_column(3, 4, 18, wrap); ws.set_column(5, 5, 80, wrap)
     for name, df in S.items():
-        df = df.drop(columns=[c for c in ("url_source",) if c in df.columns])  # URL dans le Lisez-moi (poids du fichier)
+        df = df.drop(columns=[c for c in ("url_source", "source", "date_extraction") if c in df.columns])  # dans le Lisez-moi
         df.to_excel(xw, sheet_name=name[:31], index=False)
         sh = xw.sheets[name[:31]]
         for j, c in enumerate(df.columns):
@@ -220,3 +236,12 @@ with pd.ExcelWriter(path, engine="xlsxwriter", engine_kwargs={"options": {"strin
         sh.autofilter(0, 0, len(df), len(df.columns) - 1)
 print("écrit", path, round(os.path.getsize(path) / 1e6, 1), "Mo")
 print(ctrl.to_string())
+
+# Recompression maximale (limite GitHub 100 Mio par fichier)
+import zipfile  # noqa: E402
+_tmp = path + ".tmp"
+with zipfile.ZipFile(path) as zi, zipfile.ZipFile(_tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zo:
+    for it in zi.infolist():
+        zo.writestr(it.filename, zi.read(it.filename))
+os.replace(_tmp, path)
+print("recompressé :", round(os.path.getsize(path) / 2**20, 1), "Mio")

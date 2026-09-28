@@ -5,3 +5,4 @@ __pycache__/
 scripts/*.out
 data/it/pendolarisme_od_2011.csv
 data/it/revenus_irpef_communes.csv
+data/
